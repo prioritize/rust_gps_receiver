@@ -1,0 +1,5 @@
+[port_config]
+port = "/dev/ttyUSB0"
+speed = 4800
+parity = "8N1"
+serial = "BYBBb115819"
