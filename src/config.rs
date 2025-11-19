@@ -17,7 +17,7 @@ impl Default for PortConfig {
     fn default() -> Self {
         Self {
             port: String::from("/dev/ttyUSB0"),
-            speed: 9600,
+            speed: 4800,
             parity: String::from("8N1"),
             serial: String::from("XXXXXXXXXXX"),
         }

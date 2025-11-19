@@ -1,16 +1,53 @@
 pub mod config;
 use anyhow::Result;
 use anyhow::anyhow;
+use bytes::BytesMut;
 use config::{ConfigFile, PortConfig};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 use tokio::time::sleep;
 use tokio_serial::SerialPortBuilderExt;
 use tokio_serial::SerialStream;
 use tokio_serial::{DataBits, Parity, StopBits};
+use tokio_stream::StreamExt;
+use tokio_util::codec::{BytesCodec, FramedRead};
+use tokio_util::sync::CancellationToken;
 
+pub struct SerialBuffer {
+    pub rx: tokio::sync::mpsc::Receiver<BytesMut>,
+    pub tx: tokio::sync::mpsc::Sender<String>,
+    buf: Vec<u8>,
+    current: Vec<u8>,
+    token: CancellationToken,
+}
+impl SerialBuffer {
+    async fn watch(&mut self) {
+        // Thoughts Process:
+        // Incoming message is added to the back of the buffer.
+        // When the buffer hits a certain size we trigger a search for a message $->\n
+        // We construct the message, remove it from the buffer, move all the data forward
+        // and then pass the message out
+        loop {
+            if let Some(v) = self.rx.recv().await {
+                self.buf.extend_from_slice(&v);
+            }
+            if self.buf.len() > 100 {
+                if let Some(first) = self.buf.iter().find(|&f| f == &b'$') {
+                    if let Some(last) = self.buf.iter().find(|&l| l == &b'\n') {
+                        // let msg: &[u8] = &self.buf[first..last];
+                        // self.tx
+                        //     .send(String::from_utf8_lossy(&self.buf[first..last]))
+                        //     .await;
+                    }
+                }
+            }
+        }
+    }
+}
 // Function that opens the serial port, performs a test read and then returns a result
 pub async fn open_serial_port(config: PortConfig) -> Result<SerialStream> {
     match tokio_serial::available_ports() {
@@ -52,25 +89,22 @@ pub async fn open_serial_port(config: PortConfig) -> Result<SerialStream> {
 }
 // Function that consumes all the incoming serial port data and sends it to the appropriate
 // channels
-pub async fn consume_serial_port(port: &mut SerialStream, dur: Option<Duration>) {
-    let mut internal_buf = [0u8; 256];
-    match dur {
-        Some(d) => {
-            let start = Instant::now();
-            while start.elapsed() < d {
-                match port.read(&mut internal_buf).await {
-                    Ok(_) => println!("{:?}", internal_buf),
-                    Err(_) => todo!(),
-                }
-                sleep(Duration::from_millis(100)).await;
+pub async fn consume_serial_port(
+    port: &mut SerialStream,
+    dur: Option<Duration>,
+    tx: Sender<BytesMut>,
+) {
+    let mut _internal_buf = [0u8; 256];
+    let mut reader = FramedRead::new(port, BytesCodec::new());
+    while let Some(result) = reader.next().await {
+        match result {
+            Ok(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                println!("{s}");
+                let _ = tx.send(bytes).await;
             }
+            Err(_) => todo!(),
         }
-        None => loop {
-            match port.read(&mut internal_buf).await {
-                Ok(_) => println!("{:?}", internal_buf),
-                Err(_) => todo!(),
-            }
-        },
     }
 }
 
@@ -90,11 +124,11 @@ async fn main() {
         .open_native_async()
         .expect("failed to open port");
     let mut serial_buf: Vec<u8> = vec![0; 5];
-    let _ = port
+    let l = port
         .read(serial_buf.as_mut_slice())
         .await
         .expect("Found no data");
-    println!("{}", String::from_utf8(serial_buf).unwrap());
+    println!("{}", String::from_utf8(serial_buf[0..l].to_vec()).unwrap());
 }
 
 #[cfg(test)]
@@ -113,7 +147,23 @@ mod tests {
         let mut port = open_serial_port(config).await?;
         let mut incoming_buffer: Vec<u8> = Vec::new();
         let mut buf = [0u8; 64];
-        consume_serial_port(&mut port, Some(Duration::from_secs(2))).await;
+        let (ser_tx, mut ser_rx) = mpsc::channel(10);
+        let (msg_tx, msg_rx) = mpsc::channel(20);
+        let mut sb = SerialBuffer {
+            rx: ser_rx,
+            tx: msg_tx,
+            buf: vec![],
+            current: vec![],
+            token: CancellationToken::new(),
+        };
+        tokio::spawn(async move {
+            loop {
+                if let Some(data) = sb.rx.recv().await {
+                    println!("{:?}", data);
+                }
+            }
+        });
+        consume_serial_port(&mut port, Some(Duration::from_secs(2)), ser_tx).await;
         Ok(())
     }
 }
