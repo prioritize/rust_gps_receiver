@@ -14,13 +14,14 @@ use tokio_serial::SerialPortBuilderExt;
 use tokio_serial::SerialStream;
 use tokio_serial::{DataBits, Parity, StopBits};
 use tokio_stream::StreamExt;
+use tokio_util::codec::LinesCodec;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tokio_util::sync::CancellationToken;
 
 pub struct SerialBuffer {
-    pub rx: tokio::sync::mpsc::Receiver<BytesMut>,
+    pub rx: tokio::sync::mpsc::Receiver<String>,
     pub tx: tokio::sync::mpsc::Sender<String>,
-    buf: Vec<u8>,
+    buf: Vec<String>,
     current: Vec<u8>,
     token: CancellationToken,
 }
@@ -33,18 +34,15 @@ impl SerialBuffer {
         // and then pass the message out
         loop {
             if let Some(v) = self.rx.recv().await {
-                self.buf.extend_from_slice(&v);
+                println!("received");
+                println!("length: {}", self.buf.len());
+                println!("{v}");
+                self.buf.push(v);
             }
-            if self.buf.len() > 100 {
-                if let Some(first) = self.buf.iter().find(|&f| f == &b'$') {
-                    if let Some(last) = self.buf.iter().find(|&l| l == &b'\n') {
-                        // let msg: &[u8] = &self.buf[first..last];
-                        // self.tx
-                        //     .send(String::from_utf8_lossy(&self.buf[first..last]))
-                        //     .await;
-                    }
-                }
-            }
+            // let msg: &[u8] = &self.buf[first..last];
+            // self.tx
+            //     .send(String::from_utf8_lossy(&self.buf[first..last]))
+            //     .await;
         }
     }
 }
@@ -92,15 +90,13 @@ pub async fn open_serial_port(config: PortConfig) -> Result<SerialStream> {
 pub async fn consume_serial_port(
     port: &mut SerialStream,
     dur: Option<Duration>,
-    tx: Sender<BytesMut>,
+    tx: Sender<String>,
 ) {
     let mut _internal_buf = [0u8; 256];
-    let mut reader = FramedRead::new(port, BytesCodec::new());
+    let mut reader = FramedRead::new(port, LinesCodec::new());
     while let Some(result) = reader.next().await {
         match result {
             Ok(bytes) => {
-                let s = String::from_utf8_lossy(&bytes);
-                println!("{s}");
                 let _ = tx.send(bytes).await;
             }
             Err(_) => todo!(),
@@ -156,11 +152,11 @@ mod tests {
             current: vec![],
             token: CancellationToken::new(),
         };
+        // TODO: Refactor this code to not have the buffer owned by the Serial Buffer
+        // TODO: This currently forces the watch function and the
         tokio::spawn(async move {
             loop {
-                if let Some(data) = sb.rx.recv().await {
-                    println!("{:?}", data);
-                }
+                sb.watch().await;
             }
         });
         consume_serial_port(&mut port, Some(Duration::from_secs(2)), ser_tx).await;
