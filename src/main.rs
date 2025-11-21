@@ -6,6 +6,7 @@ use config::{ConfigFile, PortConfig};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use tokio::sync;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
@@ -17,6 +18,39 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::LinesCodec;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tokio_util::sync::CancellationToken;
+
+// TODO: This function will spawn a thread and be sent messages, and send them to the appropriate parsers channel
+pub async fn message_listener() {}
+
+// TODO: This function will spawn a thread that listens for lines coming across the serial port,
+// parse the "Header" and then sends them to the appropriate channel
+pub async fn line_parser() {}
+
+pub async fn setup(cfg: &PortConfig) -> Result<()> {
+    // Check the serial ports
+    let stream = match open_serial_port(cfg).await {
+        Ok(s) => s,
+        Err(_) => return Err(anyhow!("Unable to open the serial port")),
+    };
+    let (line_tx, mut line_rx) = sync::mpsc::channel(10);
+    tokio::task::spawn(async move {
+        consume_serial_port(stream, Some(Duration::from_secs(5)), line_tx.clone()).await
+    });
+    let now = Instant::now();
+
+    while now.elapsed() < Duration::from_secs(5) {
+        if let Some(v) = line_rx.recv().await {
+            println!("{v}")
+        }
+    }
+    // Open the serial port
+    // Check for good data
+    // Spawn the line_parser
+    // Spawn the message_listener
+    // Spawn a thread for each message type
+
+    Ok(())
+}
 
 pub struct SerialBuffer {
     pub rx: tokio::sync::mpsc::Receiver<String>,
@@ -47,7 +81,7 @@ impl SerialBuffer {
     }
 }
 // Function that opens the serial port, performs a test read and then returns a result
-pub async fn open_serial_port(config: PortConfig) -> Result<SerialStream> {
+pub async fn open_serial_port(config: &PortConfig) -> Result<SerialStream> {
     match tokio_serial::available_ports() {
         Ok(ports) => {
             for p in ports {
@@ -59,7 +93,7 @@ pub async fn open_serial_port(config: PortConfig) -> Result<SerialStream> {
                             sn == config.serial
                         }) {
                             println!("Made it here");
-                            match tokio_serial::new(config.port, config.speed)
+                            match tokio_serial::new(&config.port, config.speed)
                                 .data_bits(DataBits::Eight)
                                 .parity(Parity::None)
                                 .stop_bits(StopBits::One)
@@ -87,19 +121,33 @@ pub async fn open_serial_port(config: PortConfig) -> Result<SerialStream> {
 }
 // Function that consumes all the incoming serial port data and sends it to the appropriate
 // channels
-pub async fn consume_serial_port(
-    port: &mut SerialStream,
-    dur: Option<Duration>,
-    tx: Sender<String>,
-) {
+pub async fn consume_serial_port(port: SerialStream, dur: Option<Duration>, tx: Sender<String>) {
     let mut _internal_buf = [0u8; 256];
     let mut reader = FramedRead::new(port, LinesCodec::new());
-    while let Some(result) = reader.next().await {
-        match result {
-            Ok(bytes) => {
-                let _ = tx.send(bytes).await;
+    match dur {
+        Some(d) => {
+            let now = Instant::now();
+            while let Some(result) = reader.next().await {
+                match result {
+                    Ok(bytes) => {
+                        let _ = tx.send(bytes).await;
+                    }
+                    Err(_) => todo!(),
+                }
+                if now.elapsed() > d {
+                    break;
+                }
             }
-            Err(_) => todo!(),
+        }
+        None => {
+            while let Some(result) = reader.next().await {
+                match result {
+                    Ok(bytes) => {
+                        let _ = tx.send(bytes).await;
+                    }
+                    Err(_) => todo!(),
+                }
+            }
         }
     }
 }
@@ -135,12 +183,13 @@ mod tests {
     use crate::{PortConfig, open_serial_port};
 
     #[tokio::test]
+    #[ignore]
     async fn test_read_available() -> Result<()> {
         let config = PortConfig {
             serial: String::from("BYBBb115819"),
             ..Default::default()
         };
-        let mut port = open_serial_port(config).await?;
+        let mut port = open_serial_port(&config).await?;
         let mut incoming_buffer: Vec<u8> = Vec::new();
         let mut buf = [0u8; 64];
         let (ser_tx, mut ser_rx) = mpsc::channel(10);
@@ -159,7 +208,16 @@ mod tests {
                 sb.watch().await;
             }
         });
-        consume_serial_port(&mut port, Some(Duration::from_secs(2)), ser_tx).await;
+        consume_serial_port(port, Some(Duration::from_secs(2)), ser_tx).await;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_setup() {
+        let mut file = File::open("./src/gps_config.toml").await.unwrap();
+        let mut contents = String::new();
+        let _ = file.read_to_string(&mut contents).await.unwrap();
+        let cfg: ConfigFile = toml::from_str(&contents).unwrap();
+        let _ = setup(&cfg.port_config).await;
     }
 }
