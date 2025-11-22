@@ -75,7 +75,7 @@ pub async fn setup(cfg: &PortConfig) -> Result<()> {
     });
     println!("Got through all Tokio Spawns");
 
-    tokio::time::sleep(Duration::from_secs(5));
+    tokio::time::sleep(Duration::from_secs(5)).await;
     // Open the serial port
     // Check for good data
     // Spawn the line_parser
