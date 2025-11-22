@@ -3,11 +3,14 @@ use anyhow::Result;
 use anyhow::anyhow;
 use bytes::BytesMut;
 use config::{ConfigFile, PortConfig};
+use std::os::unix::thread;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 use tokio::time::sleep;
@@ -19,12 +22,30 @@ use tokio_util::codec::LinesCodec;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tokio_util::sync::CancellationToken;
 
+pub enum GPS {
+    RMC,
+    GGA,
+    GSA,
+    GSV,
+}
+
 // TODO: This function will spawn a thread and be sent messages, and send them to the appropriate parsers channel
 pub async fn message_listener() {}
 
 // TODO: This function will spawn a thread that listens for lines coming across the serial port,
 // parse the "Header" and then sends them to the appropriate channel
-pub async fn line_parser() {}
+pub async fn line_parser(msg_rx: &mut Receiver<String>, out_tx: Sender<String>) {
+    println!("Into Line Parser");
+    if let Some(msg) = msg_rx.recv().await {
+        match &msg[3..7] {
+            "GGA" => out_tx.send(String::from("GGA")).await.unwrap(),
+            "RMC" => out_tx.send(String::from("RMC")).await.unwrap(),
+            "GSA" => out_tx.send(String::from("GSA")).await.unwrap(),
+            "GSV" => out_tx.send(String::from("GSV")).await.unwrap(),
+            _ => out_tx.send(msg).await.unwrap(),
+        }
+    }
+}
 
 pub async fn setup(cfg: &PortConfig) -> Result<()> {
     // Check the serial ports
@@ -33,16 +54,27 @@ pub async fn setup(cfg: &PortConfig) -> Result<()> {
         Err(_) => return Err(anyhow!("Unable to open the serial port")),
     };
     let (line_tx, mut line_rx) = sync::mpsc::channel(10);
-    tokio::task::spawn(async move {
+    //let (msg_tx, mut msg_rx) = sync::mpsc::channel(10);
+    let (out_tx, mut out_rx) = mpsc::channel(10);
+    std::thread::spawn(async move || {
         consume_serial_port(stream, Some(Duration::from_secs(5)), line_tx.clone()).await
     });
+    std::thread::spawn(async move || {
+        loop {
+            line_parser(&mut line_rx, out_tx.clone()).await;
+        }
+    });
+    std::thread::spawn(async move || {
+        loop {
+            if let Some(x) = out_rx.recv().await {
+                println!("{x}");
+            }
+        }
+    });
+    println!("Got through all Tokio Spawns");
     let now = Instant::now();
 
-    while now.elapsed() < Duration::from_secs(5) {
-        if let Some(v) = line_rx.recv().await {
-            println!("{v}")
-        }
-    }
+    while now.elapsed() < Duration::from_secs(5) {}
     // Open the serial port
     // Check for good data
     // Spawn the line_parser
@@ -124,6 +156,7 @@ pub async fn open_serial_port(config: &PortConfig) -> Result<SerialStream> {
 pub async fn consume_serial_port(port: SerialStream, dur: Option<Duration>, tx: Sender<String>) {
     let mut _internal_buf = [0u8; 256];
     let mut reader = FramedRead::new(port, LinesCodec::new());
+    println!("serialport is consumed");
     match dur {
         Some(d) => {
             let now = Instant::now();
