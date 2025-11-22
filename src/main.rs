@@ -13,7 +13,9 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
+use tokio::time::Sleep;
 use tokio::time::sleep;
+use tokio::time::sleep_until;
 use tokio_serial::SerialPortBuilderExt;
 use tokio_serial::SerialStream;
 use tokio_serial::{DataBits, Parity, StopBits};
@@ -56,15 +58,15 @@ pub async fn setup(cfg: &PortConfig) -> Result<()> {
     let (line_tx, mut line_rx) = sync::mpsc::channel(10);
     //let (msg_tx, mut msg_rx) = sync::mpsc::channel(10);
     let (out_tx, mut out_rx) = mpsc::channel(10);
-    std::thread::spawn(async move || {
+    tokio::task::spawn(async move {
         consume_serial_port(stream, Some(Duration::from_secs(5)), line_tx.clone()).await
     });
-    std::thread::spawn(async move || {
+    tokio::task::spawn(async move {
         loop {
             line_parser(&mut line_rx, out_tx.clone()).await;
         }
     });
-    std::thread::spawn(async move || {
+    tokio::task::spawn(async move {
         loop {
             if let Some(x) = out_rx.recv().await {
                 println!("{x}");
@@ -72,9 +74,8 @@ pub async fn setup(cfg: &PortConfig) -> Result<()> {
         }
     });
     println!("Got through all Tokio Spawns");
-    let now = Instant::now();
 
-    while now.elapsed() < Duration::from_secs(5) {}
+    tokio::time::sleep(Duration::from_secs(5));
     // Open the serial port
     // Check for good data
     // Spawn the line_parser
